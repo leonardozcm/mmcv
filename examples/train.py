@@ -234,11 +234,11 @@ class MMCVEstimator(OrcaRayEstimator):
         return epoch_stats
 
     def _print_eval_results(self, eval_results):
-        keys = eval_results[0]
+        first = eval_results[0]
 
-        print_dict = {}
+        dict_for_print = {}
 
-        for k in keys:
+        for k in first:
             correct = 0.0
             total = 0
             for d in eval_results:
@@ -246,8 +246,8 @@ class MMCVEstimator(OrcaRayEstimator):
                 for c, t in cur_list:
                     correct += c
                     total += t
-            print_dict[k] = correct / total
-        print(print_dict)
+            dict_for_print[k] = correct / total
+        print(dict_for_print)
 
 
     def _train_epochs(self, **params) -> None:
@@ -365,7 +365,8 @@ if __name__ == '__main__':
 
         valloader = DataLoader(
             valset, batch_size=batch_size, shuffle=False, num_workers=2)
-        eval_hook = DistEvalHook(valloader, interval=1, test_fn=cifar10_test_fn, greater_keys=["acc"])
+        #eval_hook = DistEvalHook(valloader, interval=1, test_fn=cifar10_test_fn, greater_keys=["acc"])
+        eval_hook = DistEvalHook()
         runner.register_hook(eval_hook)
 
         return runner
@@ -405,38 +406,9 @@ if __name__ == '__main__':
 
 
 from collections import defaultdict
+from mmcv.runner import Hook
 
-class DistEvalHook(EvalHook):
-    def __init__(self,
-                 dataloader: DataLoader,
-                 start: Optional[int] = None,
-                 interval: int = 1,
-                 by_epoch: bool = True,
-                 save_best: Optional[str] = None,
-                 rule: Optional[str] = None,
-                 test_fn: Optional[Callable] = None,
-                 greater_keys: Optional[List[str]] = None,
-                 less_keys: Optional[List[str]] = None,
-                 out_dir: Optional[str] = None,
-                 file_client_args: Optional[dict] = None,
-                 **eval_kwargs):
-        if test_fn is None:
-            from mmcv.engine import multi_gpu_test
-            test_fn = multi_gpu_test
-
-        super().__init__(
-            dataloader,
-            start=start,
-            interval=interval,
-            by_epoch=by_epoch,
-            save_best=save_best,
-            rule=rule,
-            test_fn=test_fn,
-            greater_keys=greater_keys,
-            less_keys=less_keys,
-            out_dir=out_dir,
-            file_client_args=file_client_args,
-            **eval_kwargs)
+class DistEvalHook(Hook):
 
     def before_run(self, runner):
         runner.eval_result = defaultdict(list)
