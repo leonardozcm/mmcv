@@ -42,14 +42,15 @@ class Model(nn.Module):
 
     def val_step(self, data, optimizer):
         inputs, targets = data
-        correct=0.0
-        total=0
+        correct = 0.0
+        total = 0
         with torch.no_grad():
             preds = torch.argmax(self(inputs), dim=-1)
             correct = torch.sum(torch.eq(preds, targets)).item()
             total = targets.numel()
 
-        return {"correct":correct, "total":total}
+        return {"correct": correct, "total": total}
+
 
 from bigdl.orca.learn.ray_estimator import Estimator as OrcaRayEstimator
 from bigdl.orca.ray import OrcaRayContext
@@ -57,7 +58,6 @@ from bigdl.orca import init_orca_context, stop_orca_context
 from bigdl.orca.learn.pytorch.pytorch_ray_estimator import get_driver_node_ip, check_for_failure
 from bigdl.orca.learn.pytorch.utils import find_free_port
 from bigdl.orca.learn.pytorch.torch_runner import TorchDistBackend
-
 
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
@@ -70,8 +70,7 @@ import ray
 
 
 class MMCVRunner(EpochBasedRunner):
-
-    EBR_slots=(
+    EBR_slots = (
         "model",
         "batch_processor",
         "optimizer",
@@ -90,12 +89,12 @@ class MMCVRunner(EpochBasedRunner):
         "_max_epochs",
         "_max_iters",
         "log_buffer",
-    ) # Here just for declaration
+    )  # Here just for declaration
 
     def __init__(self, runner_creator=None, config=None) -> None:
         self.runner_creator = runner_creator
         self.config = config
-
+        self.eval_result = {}
 
     # Expose attrs of EBR here for concise when overriding `train_step` etc. in EpochBasedRunner,
     # for example:
@@ -105,7 +104,10 @@ class MMCVRunner(EpochBasedRunner):
         for k in self.EBR_slots:
             # todo: check neccessary components
             setattr(self, k, getattr(ebrunner, k))
-    
+
+    def get_eval_result(self):
+        return self.eval_result
+
     def setup(self, cores_per_node):
         import torch
         torch.set_num_threads(cores_per_node)
@@ -115,7 +117,7 @@ class MMCVRunner(EpochBasedRunner):
         import torch.distributed as dist
         from mmcv.parallel.distributed import MMDistributedDataParallel
 
-        client_store = dist.TCPStore(tcp_store_host, tcp_store_port, -1, False)        
+        client_store = dist.TCPStore(tcp_store_host, tcp_store_port, -1, False)
         dist.init_process_group(
             backend="gloo",
             store=client_store,
@@ -125,11 +127,11 @@ class MMCVRunner(EpochBasedRunner):
         self.world_rank = world_rank
         self.size = world_size
         self.setup_components()
-        
+
         #     - It supports a custom type :class:`DataContainer` which allows more
         #       flexible control of input data.
         #     - It implement two APIs ``train_step()`` and ``val_step()``.
-        self.model = MMDistributedDataParallel(self.model) # runner.model: `torch.nn.Module`
+        self.model = MMDistributedDataParallel(self.model)  # runner.model: `torch.nn.Module`
 
     def setup_components(self):
         runner = self.runner_creator(self.config)
@@ -157,9 +159,9 @@ class MMCVRunner(EpochBasedRunner):
         return super().train(data_loader, **kwargs)
 
     def run(self,
-            data_loaders_creators:List[Callable],
+            data_loaders_creators: List[Callable],
             workflow: List[Tuple[str, int]],
-            max_epochs: Optional[int] = None, # deprecated
+            max_epochs: Optional[int] = None,  # deprecated
             **kwargs) -> None:
         """Start running.
 
@@ -171,9 +173,10 @@ class MMCVRunner(EpochBasedRunner):
                 running 2 epochs for training and 1 epoch for validation,
                 iteratively.
         """
-        data_loaders = [self.with_sampler(dataloader_creator(self.config)) for dataloader_creator in data_loaders_creators]
+        data_loaders = [self.with_sampler(dataloader_creator(self.config)) for dataloader_creator in
+                        data_loaders_creators]
         super().run(data_loaders, workflow, max_epochs, **kwargs)
-        
+
 
 class MMCVEstimator(OrcaRayEstimator):
     def __init__(self, runner_creator=None, config=None) -> None:
@@ -181,12 +184,12 @@ class MMCVEstimator(OrcaRayEstimator):
         self.runner_creator = runner_creator
         ray_ctx = OrcaRayContext.get()
 
-        workers_per_node =1
+        workers_per_node = 1
         cores_per_node = ray_ctx.ray_node_cpu_cores // workers_per_node
         num_nodes = ray_ctx.num_ray_nodes * workers_per_node
         RemoteRunner = ray.remote(num_cpus=cores_per_node)(MMCVRunner)
 
-        params = dict(runner_creator = self.runner_creator,
+        params = dict(runner_creator=self.runner_creator,
                       config=config)
 
         self.remote_workers = [
@@ -201,7 +204,7 @@ class MMCVEstimator(OrcaRayEstimator):
         driver_tcp_store_port = find_free_port()
 
         _ = dist.TCPStore(driver_ip, driver_tcp_store_port, -1, True,
-                            dist.constants.default_pg_timeout)
+                          dist.constants.default_pg_timeout)
 
         ray.get([
             worker.setup_torch_distribute.remote(
@@ -209,23 +212,43 @@ class MMCVEstimator(OrcaRayEstimator):
             for i, worker in enumerate(self.remote_workers)
         ])
 
-    
     def fit(self,
-            data_loaders:List[Callable],
+            data_loaders: List[Callable],
             workflow: List[Tuple[str, int]],
-            max_epochs: Optional[int] = None, # deprecated
+            max_epochs: Optional[int] = None,  # deprecated
             **kwargs) -> None:
-        params=dict(data_loaders_creators=data_loaders,
-                    workflow=workflow,
-                    max_epochs=max_epochs,
-                    **kwargs)
+        params = dict(data_loaders_creators=data_loaders,
+                      workflow=workflow,
+                      max_epochs=max_epochs,
+                      **kwargs)
         success, worker_stats = self._train_epochs(**params)
         print(worker_stats)
+
+        eval_result_from_workers = ray.get([worker.get_eval_result.remote()
+                                            for worker in self.remote_workers])
+        self._print_eval_results(eval_result_from_workers)
 
         epoch_stats = list(map(list, zip(*worker_stats)))
         for i in range(len(epoch_stats)):
             epoch_stats[i] = self._process_stats(epoch_stats[i])
         return epoch_stats
+
+    def _print_eval_results(self, eval_results):
+        first = eval_results[0]
+
+        dict_for_print = {}
+
+        for k in first:
+            correct = 0.0
+            total = 0
+            for d in eval_results:
+                cur_list = d[k]
+                for c, t in cur_list:
+                    correct += c
+                    total += t
+            dict_for_print[k] = correct / total
+        print(dict_for_print)
+
 
     def _train_epochs(self, **params) -> None:
         remote_worker_stats = []
@@ -263,13 +286,12 @@ class MMCVEstimator(OrcaRayEstimator):
 
     def shutdown(self):
         return super().shutdown()
-    
-
 
 
 if __name__ == '__main__':
     init_orca_context(cores=8, memory="8g")
     batch_size = 32
+
 
     def runner_creator(config):
         model = Model()
@@ -306,7 +328,7 @@ if __name__ == '__main__':
         # Evaluation Part(Optional)
         from typing import OrderedDict
         def evaluate(self, results, logger=None):
-            acc=results.item()
+            acc = results.item()
             output = OrderedDict(
                 acc=acc
             )
@@ -314,8 +336,8 @@ if __name__ == '__main__':
 
         def cifar10_test_fn(model: nn.Module, data_loader: DataLoader) -> list:
             model.eval()
-            results=[]
-            dataset=data_loader.dataset
+            results = []
+            dataset = data_loader.dataset
             prog_bar = mmcv.ProgressBar(len(dataset))
 
             correct = torch.tensor(0)
@@ -329,7 +351,7 @@ if __name__ == '__main__':
                 batch_size = len(inputs)
                 for _ in range(batch_size):
                     prog_bar.update()
-                
+
             return correct.float() / total
 
         from types import MethodType
@@ -339,11 +361,12 @@ if __name__ == '__main__':
         ])
         valset = CIFAR10(
             root='data', train=False, download=True, transform=transform)
-        valset.evaluate=MethodType(evaluate, valset)
+        valset.evaluate = MethodType(evaluate, valset)
 
         valloader = DataLoader(
             valset, batch_size=batch_size, shuffle=False, num_workers=2)
-        eval_hook = EvalHook(valloader, interval=1, test_fn=cifar10_test_fn, greater_keys=["acc"])
+        #eval_hook = DistEvalHook(valloader, interval=1, test_fn=cifar10_test_fn, greater_keys=["acc"])
+        eval_hook = DistEvalHook()
         runner.register_hook(eval_hook)
 
         return runner
@@ -361,6 +384,7 @@ if __name__ == '__main__':
             trainset, batch_size=batch_size, shuffle=True, num_workers=2)
         return trainloader
 
+
     def val_dataloader_creator(config):
         # dataset and dataloader
         transform = transforms.Compose([
@@ -373,8 +397,21 @@ if __name__ == '__main__':
         valloader = DataLoader(
             valset, batch_size=batch_size, shuffle=False, num_workers=2)
         return valloader
-    
-    est = MMCVEstimator(runner_creator=runner_creator,config={})
+
+
+    est = MMCVEstimator(runner_creator=runner_creator, config={})
     est.fit([train_dataloader_creator, val_dataloader_creator], [('train', 1), ('val', 1)])
 
     stop_orca_context()
+
+
+from collections import defaultdict
+from mmcv.runner import Hook
+
+class DistEvalHook(Hook):
+
+    def before_run(self, runner):
+        runner.eval_result = defaultdict(list)
+
+    def after_val_iter(self, runner):
+        runner.eval_result[runner._epoch].append((runner.outputs['correct'], runner.outputs['total']))
